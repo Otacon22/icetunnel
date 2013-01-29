@@ -220,7 +220,6 @@ static int icedemo_worker_thread(void *unused)
 
     while (!icedemo.thread_quit_flag) {
 	handle_events(5, NULL);
-	printf("Ole\n");
     }
 
     return 0;
@@ -248,11 +247,11 @@ static void cb_on_rx_data(pj_ice_strans *ice_st,
     // Don't do this! It will ruin the packet buffer in case TCP is used!
     //((char*)pkt)[size] = '\0';
 
-    PJ_LOG(3,(THIS_FILE, "Component %d: received %d bytes data from %s: \"%.*s\"",
+    /*PJ_LOG(3,(THIS_FILE, "Component %d: received %d bytes data from %s: \"%.*s\"",
 	      comp_id, size,
 	      pj_sockaddr_print(src_addr, ipstr, sizeof(ipstr), 3),
 	      (unsigned)size,
-	      (char*)pkt));
+	      (char*)pkt));*/
 	      
     n = sendto(udp_sock, (char*)pkt, (unsigned)size, 0, 
 	       (struct sockaddr *)&udp_addr, sizeof(udp_addr));
