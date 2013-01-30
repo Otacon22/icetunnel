@@ -150,7 +150,7 @@ static void err_exit(const char *title, pj_status_t status)
  */
 static pj_status_t handle_events(unsigned max_msec, unsigned *p_count)
 {
-    enum { MAX_NET_EVENTS = 1 };
+    enum { MAX_NET_EVENTS = 100 };
     pj_time_val max_timeout = {0, 0};
     pj_time_val timeout = { 0, 0};
     unsigned count = 0, net_event_count = 0;
