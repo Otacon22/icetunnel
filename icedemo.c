@@ -1,4 +1,3 @@
-/* $Id: icedemo.c 3841 2011-10-24 09:28:13Z ming $ */
 /* 
  * Copyright (C) 2008-2011 Teluu Inc. (http://www.teluu.com)
  * Copyright (C) 2012 Daniele Iamartino <danieleiamartino at gmail.com>
@@ -36,14 +35,20 @@ pthread_t tcp_server_tid;
 
 char buffer_data[MAXLINE] = {0};
 char recv_buff[MAXLINE] = {0};
-int udp_sock;
-struct sockaddr_in udp_addr;
+int tool_sock;
+struct sockaddr_in tool_endpoint_addr;
 
-#define TCP_SERV_PORT 7001 //7001
-#define UDP_SERV_PORT 7002 //7002
+int tcp_server_port = 7001;
+int tool_server_port = 7002;
+int tool_client_port = 7003;
+char *tool_client_address = "127.0.0.1";
 
-#define UDP_IPSEC_SERVER_PORT 7003 //7003
-#define UDP_IPSEC_SERVER_ADDRESS "127.0.0.1"
+enum working_modes {
+   UDP_MODE,
+   TCP_MODE
+} tool_mode = UDP_MODE;
+
+
 
 
 
@@ -248,8 +253,8 @@ static void cb_on_rx_data(pj_ice_strans *ice_st,
     PJ_UNUSED_ARG(src_addr_len);
     PJ_UNUSED_ARG(pkt);
 	      
-    if ( sendto(udp_sock, (char*)pkt, (unsigned)size, 0, 
-	       (struct sockaddr *)&udp_addr, sizeof(udp_addr)) < 0) {
+    if ( sendto(tool_sock, (char*)pkt, (unsigned)size, 0, 
+	       (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
         perror("UDP socket sendto error");
         exit(-1);
     }
@@ -981,7 +986,7 @@ static void *tcp_server(void *arg){
     }
     memset((void *)&serv_add, 0, sizeof(serv_add)); /* clear server address */
     serv_add.sin_family = AF_INET;                  /* address type is INET */
-    serv_add.sin_port = htons(TCP_SERV_PORT);                   /* echo port is ... */
+    serv_add.sin_port = htons(tcp_server_port);     /* port is ... */
     serv_add.sin_addr.s_addr = htonl(INADDR_ANY);   /* connect from anywhere */
     
     if (setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&tr,sizeof(tr)) == -1) {
@@ -1035,12 +1040,12 @@ static void *tcp_server(void *arg){
 	close(fd);
 }
 
-static void iceauto_udpsrv(int type_offerer){
-    static char buffer[1000];
-    int len;
+static void iceauto_toolsrv(int type_offerer){
+    static char buffer[MAXLINE];
+    socklen_t len;
     char *type;
-    int a, n, verbose=1;
-    char udp_buffer[MAXLINE]; 
+    int n;
+    char tool_buffer[MAXLINE]; 
     
     if (type_offerer)
         type = "o";
@@ -1048,26 +1053,26 @@ static void iceauto_udpsrv(int type_offerer){
         type = "a";
     
     /* create socket for later use UDP server */
-    if ( (udp_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+    if ( (tool_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
 	    perror("Socket creation error");
 	    exit(-1);
     }
     /* initialize address */
-    memset((void *)&udp_addr, 0, sizeof(udp_addr));     /* clear server address */
-    udp_addr.sin_family = AF_INET;                  /* address type is INET */
+    memset((void *)&tool_endpoint_addr, 0, sizeof(tool_endpoint_addr));     /* clear server address */
+    tool_endpoint_addr.sin_family = AF_INET;                  /* address type is INET */
     if (type_offerer){
-        udp_addr.sin_port = htons(UDP_SERV_PORT);                  /* daytime port is 13 */
-        udp_addr.sin_addr.s_addr = htonl(INADDR_ANY);   /* connect from anywhere */
+        tool_endpoint_addr.sin_port = htons(tool_server_port);                  /* daytime port is 13 */
+        tool_endpoint_addr.sin_addr.s_addr = htonl(INADDR_ANY);   /* connect from anywhere */
         
         /* bind socket */
-        if (bind(udp_sock, (struct sockaddr *)&udp_addr, sizeof(udp_addr)) < 0) {
+        if (bind(tool_sock, (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
 	        perror("bind error");
 	        exit(-1);
         }
     }
     else {
-        udp_addr.sin_port = htons(UDP_IPSEC_SERVER_PORT); 
-        if ( (inet_pton(AF_INET, UDP_IPSEC_SERVER_ADDRESS, &udp_addr.sin_addr)) <= 0) {
+        tool_endpoint_addr.sin_port = htons(tool_client_port); 
+        if ( (inet_pton(AF_INET, tool_client_address, &tool_endpoint_addr.sin_addr)) <= 0) {
 	        perror("Address creation error");
 	        exit(-1);
         }
@@ -1083,10 +1088,12 @@ static void iceauto_udpsrv(int type_offerer){
     
     printf("Creating ICE instance\n");
     icedemo_create_instance();
+    
     printf("Session initialization starting\n");
     pthread_mutex_lock(&lock_on_ice_init);
     pthread_mutex_unlock(&lock_on_ice_init);
     icedemo_init_session(*type);
+    
     printf("Session initialization completed\n");
     
     
@@ -1106,22 +1113,25 @@ static void iceauto_udpsrv(int type_offerer){
 
     strncpy(buffer_data, buffer, strlen(buffer));
     pthread_mutex_unlock(&lock_on_buffer_data);
+    
     pthread_join(tcp_server_tid, NULL);
     icedemo_input_remote(recv_buff);
     pthread_mutex_lock(&lock_on_ice_init);
+    
     icedemo_start_nego();
     pthread_mutex_lock(&lock_on_ice_init);
     pthread_mutex_unlock(&lock_on_ice_init);
     
     while (1) {
-        len = sizeof(udp_addr);
-	    n = recvfrom(udp_sock, udp_buffer, MAXLINE, 0, (struct sockaddr *)&udp_addr, &len);
+        len = sizeof(tool_endpoint_addr);
+	    n = recvfrom(tool_sock, tool_buffer, MAXLINE, 0, 
+	            (struct sockaddr *)&tool_endpoint_addr, &len);
 	    if (n < 0) {
 	        perror("recvfrom error");
 	        exit(-1);
 	    }
 	    
-	    icedemo_send_data(1, udp_buffer, n);
+	    icedemo_send_data(1, tool_buffer, n);
     }
 }
 
@@ -1133,7 +1143,7 @@ static void iceauto_udpsrv(int type_offerer){
 static void icedemo_usage()
 {
     puts("Usage: icedemo [optons]");
-    printf("icedemo v%s by pjsip.org\n", pj_get_version());
+    printf("icedemo v%s by pjsip.org\nModded version!\n", pj_get_version());
     puts("");
     puts("General options:");
     puts(" --comp-cnt, -c N          Component count (default=1)");
@@ -1144,6 +1154,11 @@ static void icedemo_usage()
     puts(" --log-file, -L FILE       Save output to log FILE");
     puts(" --offerer, -o             Set the ICE mode as offerer (default behaviour)");
     puts(" --answerer, -a            Set the ICE mode as answerer");
+    puts(" --sdp-tcp-port, -S N      Set the TCP server port to receive SDP information (default 7001)");
+    puts(" --offer-port, -O N        Set the UDP server port of the offerer (default 7002)");
+    puts(" --answ-port, -A N         Set the UDP client port of the answerer (default 7003)");
+    puts(" --answ-addr, -C HOST      Set the UDP client address of the answerer (default 7004)");
+    puts(" --tcp-mode, -P            Set the use of TCP instead of UDP for the tool client/server");
     puts(" --help, -h                Display this screen.");
     puts("");
     puts("STUN related options:");
@@ -1170,19 +1185,24 @@ int main(int argc, char *argv[])
 {
     struct pj_getopt_option long_options[] = {
 	{ "comp-cnt",           1, 0, 'c'},
-	{ "nameserver",		1, 0, 'n'},
-	{ "max-host",		1, 0, 'H'},
-	{ "help",		0, 0, 'h'},
-	{ "stun-srv",		1, 0, 's'},
-	{ "turn-srv",		1, 0, 't'},
-	{ "turn-tcp",		0, 0, 'T'},
-	{ "turn-username",	1, 0, 'u'},
-	{ "turn-password",	1, 0, 'p'},
-	{ "turn-fingerprint",	0, 0, 'F'},
-	{ "regular",		0, 0, 'R'},
-	{ "log-file",		1, 0, 'L'},
-	{ "offerer",        0, 0, 'o'},
-	{ "answerer",        0, 0, 'a'},
+	{ "nameserver",	        1, 0, 'n'},
+	{ "max-host",           1, 0, 'H'},
+	{ "help",               0, 0, 'h'},
+	{ "stun-srv",           1, 0, 's'},
+	{ "turn-srv",           1, 0, 't'},
+	{ "turn-tcp",           0, 0, 'T'},
+	{ "turn-username",      1, 0, 'u'},
+	{ "turn-password",      1, 0, 'p'},
+	{ "turn-fingerprint",   0, 0, 'F'},
+	{ "regular",            0, 0, 'R'},
+	{ "log-file",           1, 0, 'L'},
+	{ "offerer",            0, 0, 'o'},
+	{ "answerer",           0, 0, 'a'},
+	{ "sdp-tcp-port",       1, 0, 'S'},
+	{ "offer-port",         1, 0, 'O'},
+	{ "answ-port",          1, 0, 'A'},
+	{ "answ-addr",          1, 0, 'C'},
+	{ "tcp-mode",           0, 0, 'P'},
     };
     int c, opt_id;
     pj_status_t status;
@@ -1191,59 +1211,74 @@ int main(int argc, char *argv[])
     icedemo.opt.comp_cnt = 1;
     icedemo.opt.max_host = -1;
 
-    while((c=pj_getopt_long(argc,argv, "c:n:s:t:u:p:H:L:hTFRoa", long_options, &opt_id))!=-1) {
-	switch (c) {
-	case 'c':
-	    icedemo.opt.comp_cnt = atoi(pj_optarg);
-	    if (icedemo.opt.comp_cnt < 1 || icedemo.opt.comp_cnt >= PJ_ICE_MAX_COMP) {
-		puts("Invalid component count value");
-		return 1;
-	    }
-	    break;
-	case 'n':
-	    icedemo.opt.ns = pj_str(pj_optarg);
-	    break;
-	case 'H':
-	    icedemo.opt.max_host = atoi(pj_optarg);
-	    break;
-	case 'h':
-	    icedemo_usage();
-	    return 0;
-	case 's':
-	    icedemo.opt.stun_srv = pj_str(pj_optarg);
-	    break;
-	case 't':
-	    icedemo.opt.turn_srv = pj_str(pj_optarg);
-	    break;
-	case 'T':
-	    icedemo.opt.turn_tcp = PJ_TRUE;
-	    break;
-	case 'u':
-	    icedemo.opt.turn_username = pj_str(pj_optarg);
-	    break;
-	case 'p':
-	    icedemo.opt.turn_password = pj_str(pj_optarg);
-	    break;
-	case 'F':
-	    icedemo.opt.turn_fingerprint = PJ_TRUE;
-	    break;
-	case 'R':
-	    icedemo.opt.regular = PJ_TRUE;
-	    break;
-	case 'L':
-	    icedemo.opt.log_file = pj_optarg;
-	    break;
-    case 'o':
-        type_offerer=1;
-        break;
-    case 'a':
-        type_offerer=0;
-        break;
-	default:
-	    printf("Argument \"%s\" is not valid. Use -h to see help",
-		   argv[pj_optind]);
-	    return 1;
-	}
+    while((c=pj_getopt_long(argc,argv, "c:n:s:t:u:p:H:L:S:O:A:C:hTFRoa", long_options, &opt_id)) != -1) {
+	    switch (c) {
+	        case 'c':
+	            icedemo.opt.comp_cnt = atoi(pj_optarg);
+	            if (icedemo.opt.comp_cnt < 1 || icedemo.opt.comp_cnt >= PJ_ICE_MAX_COMP) {
+		        puts("Invalid component count value");
+		        return 1;
+	            }
+	            break;
+	        case 'n':
+	            icedemo.opt.ns = pj_str(pj_optarg);
+	            break;
+	        case 'H':
+	            icedemo.opt.max_host = atoi(pj_optarg);
+	            break;
+	        case 'h':
+	            icedemo_usage();
+	            return 0;
+	        case 's':
+	            icedemo.opt.stun_srv = pj_str(pj_optarg);
+	            break;
+	        case 't':
+	            icedemo.opt.turn_srv = pj_str(pj_optarg);
+	            break;
+	        case 'T':
+	            icedemo.opt.turn_tcp = PJ_TRUE;
+	            break;
+	        case 'u':
+	            icedemo.opt.turn_username = pj_str(pj_optarg);
+	            break;
+	        case 'p':
+	            icedemo.opt.turn_password = pj_str(pj_optarg);
+	            break;
+	        case 'F':
+	            icedemo.opt.turn_fingerprint = PJ_TRUE;
+	            break;
+	        case 'R':
+	            icedemo.opt.regular = PJ_TRUE;
+	            break;
+	        case 'L':
+	            icedemo.opt.log_file = pj_optarg;
+	            break;
+            case 'o':
+                type_offerer=1;
+                break;
+            case 'a':
+                type_offerer=0;
+                break;
+            case 'S':
+                tcp_server_port = atoi(pj_optarg);
+                break;
+            case 'O':
+                tool_server_port = atoi(pj_optarg);
+                break;
+            case 'A':
+                tool_client_port = atoi(pj_optarg);
+                break;
+            case 'C':
+                tool_client_address = pj_optarg;
+                break;
+            case 'P':
+                tool_mode = TCP_MODE;
+                break;
+	        default:
+	            printf("Argument \"%s\" is not valid. Use -h to see help\n",
+		           argv[pj_optind]);
+	            return 1;
+        }
     }
 
     status = icedemo_init();
@@ -1252,13 +1287,13 @@ int main(int argc, char *argv[])
     
     if (pthread_mutex_init(&lock_on_buffer_data, NULL) != 0)
     {
-        printf("\n mutex init failed\n");
+        printf("Mutex init failed!\n");
         exit(1);
     }
     pthread_mutex_lock(&lock_on_buffer_data);
     
     pthread_create(&tcp_server_tid, NULL, tcp_server, NULL);
-    iceauto_udpsrv(type_offerer);
+    iceauto_toolsrv(type_offerer);
     
     err_exit("Quitting..", PJ_SUCCESS);
     return 0;
