@@ -1047,8 +1047,8 @@ static void icedemo_send_data(unsigned comp_id, const char *data, unsigned int l
 				  pj_sockaddr_get_len(&icedemo.rem.def_addr[comp_id-1]));
     if (status != PJ_SUCCESS)
 	icedemo_perror("Error sending data", status);
-    else
-	PJ_LOG(3,(THIS_FILE, "Data sent"));
+    /*else
+	PJ_LOG(3,(THIS_FILE, "Data sent"));*/
 }
 
 
