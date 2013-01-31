@@ -150,7 +150,7 @@ static void err_exit(const char *title, pj_status_t status)
  */
 static pj_status_t handle_events(unsigned max_msec, unsigned *p_count)
 {
-    enum { MAX_NET_EVENTS = 100 };
+    enum { MAX_NET_EVENTS = 1 };
     pj_time_val max_timeout = {0, 0};
     pj_time_val timeout = { 0, 0};
     unsigned count = 0, net_event_count = 0;
@@ -1016,7 +1016,7 @@ static void icedemo_start_nego(void)
 /*
  * Send application data to remote agent.
  */
-static void icedemo_send_data(unsigned comp_id, const char *data)
+static void icedemo_send_data(unsigned comp_id, const char *data, unsigned int length)
 {
     pj_status_t status;
 
@@ -1042,7 +1042,7 @@ static void icedemo_send_data(unsigned comp_id, const char *data)
 	return;
     }
 
-    status = pj_ice_strans_sendto(icedemo.icest, comp_id, data, strlen(data),
+    status = pj_ice_strans_sendto(icedemo.icest, comp_id, data, length,
 				  &icedemo.rem.def_addr[comp_id-1],
 				  pj_sockaddr_get_len(&icedemo.rem.def_addr[comp_id-1]));
     if (status != PJ_SUCCESS)
@@ -1274,7 +1274,6 @@ static void iceauto_udpsrv(int type_offerer){
 	        exit(-1);
 	    }
 	    
-	    udp_buffer[n]='\0';
 	    /*
 	    timeval = time(NULL);
 	    snprintf(buffer, sizeof(buffer), "%.24s\r\n", ctime(&timeval));
@@ -1285,7 +1284,7 @@ static void iceauto_udpsrv(int type_offerer){
 	        exit(-1);
 	    }
 	    */
-	    icedemo_send_data(1, udp_buffer);
+	    icedemo_send_data(1, udp_buffer, n);
     }
 }
 
@@ -1361,7 +1360,7 @@ static void icedemo_console(void)
 		char *data = comp + strlen(comp) + 1;
 		if (!data)
 		    data = "";
-		icedemo_send_data(atoi(comp), data);
+		//icedemo_send_data(atoi(comp), data);
 	    }
 
 	} else if (strcmp(cmd, "help")==0 || strcmp(cmd, "h")==0) {
