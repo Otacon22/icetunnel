@@ -27,9 +27,10 @@
 #include <arpa/inet.h>   /* IP addresses conversion utilities */
 #include <sys/socket.h>  /* socket constants, types and functions */
 #include <errno.h>
+#include <unistd.h>
 
 pthread_mutex_t lock_on_ice_init, lock_on_buffer_data;
-pthread_t tcp_server_tid;
+pthread_t sdp_tcp_server_tid;
 
 #define MAXLINE 65536
 
@@ -37,17 +38,24 @@ char buffer_data[MAXLINE] = {0};
 char recv_buff[MAXLINE] = {0};
 int tool_sock;
 struct sockaddr_in tool_endpoint_addr;
+socklen_t len;
 
-int tcp_server_port = 7001;
+int sdp_tcp_server_port = 7001;
 int tool_server_port = 7002;
 int tool_client_port = 7003;
 char *tool_client_address = "127.0.0.1";
 
+int conn_fd; /* TCP connection socket, shared for sending errors */
+
 enum working_modes {
-   UDP_MODE,
-   TCP_MODE
+    UDP_MODE,
+    TCP_MODE
 } tool_mode = UDP_MODE;
 
+enum control_mode {
+    OFFERER,
+    ANSWERER
+} tool_control_mode = OFFERER;
 
 
 
@@ -328,7 +336,7 @@ static pj_status_t icedemo_init(void)
 
     /* Create application memory pool */
     icedemo.pool = pj_pool_create(&icedemo.cp.factory, "icedemo", 
-				  51200, 51200, NULL);
+				  5120, 5120, NULL);
 
     /* Create timer heap for timer stuff */
     CHECK( pj_timer_heap_create(icedemo.pool, 100, 
@@ -349,15 +357,15 @@ static pj_status_t icedemo_init(void)
 
     /* Create DNS resolver if nameserver is set */
     if (icedemo.opt.ns.slen) {
-	CHECK( pj_dns_resolver_create(&icedemo.cp.factory, 
-				      "resolver", 
-				      0, 
-				      icedemo.ice_cfg.stun_cfg.timer_heap,
-				      icedemo.ice_cfg.stun_cfg.ioqueue, 
-				      &icedemo.ice_cfg.resolver) );
+	    CHECK( pj_dns_resolver_create(&icedemo.cp.factory, 
+				          "resolver", 
+				          0, 
+				          icedemo.ice_cfg.stun_cfg.timer_heap,
+				          icedemo.ice_cfg.stun_cfg.ioqueue, 
+				          &icedemo.ice_cfg.resolver) );
 
-	CHECK( pj_dns_resolver_set_ns(icedemo.ice_cfg.resolver, 1, 
-				      &icedemo.opt.ns, NULL) );
+	    CHECK( pj_dns_resolver_set_ns(icedemo.ice_cfg.resolver, 1, 
+				          &icedemo.opt.ns, NULL) );
     }
 
     /* -= Start initializing ICE stream transport config =- */
@@ -492,9 +500,9 @@ static void icedemo_destroy_instance(void)
 /*
  * Create ICE session, invoked from the menu.
  */
-static void icedemo_init_session(unsigned rolechar)
+static void icedemo_init_session()
 {
-    pj_ice_sess_role role = (pj_tolower((pj_uint8_t)rolechar)=='o' ? 
+    pj_ice_sess_role role = ((tool_control_mode == OFFERER) ? 
 				PJ_ICE_SESS_ROLE_CONTROLLING : 
 				PJ_ICE_SESS_ROLE_CONTROLLED);
     pj_status_t status;
@@ -758,11 +766,11 @@ static void icedemo_input_remote(char *data)
 	        case 'a':
 	            {
 		        char *attr = strtok(line+2, ": \t\r\n");
-		        if (strcmp(attr, "ice-ufrag")==0) {
+		        if (strcmp(attr, "ice-ufrag") == 0) {
 		            strcpy(icedemo.rem.ufrag, attr+strlen(attr)+1);
-		        } else if (strcmp(attr, "ice-pwd")==0) {
+		        } else if (strcmp(attr, "ice-pwd") == 0) {
 		            strcpy(icedemo.rem.pwd, attr+strlen(attr)+1);
-		        } else if (strcmp(attr, "rtcp")==0) {
+		        } else if (strcmp(attr, "rtcp") == 0) {
 		            char *val = attr+strlen(attr)+1;
 		            int af, cnt;
 		            int port;
@@ -858,9 +866,9 @@ static void icedemo_input_remote(char *data)
 	    }
     }
 
-    if (icedemo.rem.cand_cnt==0 ||
-	        icedemo.rem.ufrag[0]==0 ||
-	        icedemo.rem.pwd[0]==0 ||
+    if (icedemo.rem.cand_cnt == 0 ||
+	        icedemo.rem.ufrag[0] == 0 ||
+	        icedemo.rem.pwd[0] == 0 ||
 	        icedemo.rem.comp_cnt == 0)
     {
 	    PJ_LOG(1, (THIS_FILE, "Error: not enough info"));
@@ -968,10 +976,12 @@ static void icedemo_send_data(unsigned comp_id, const char *data, unsigned int l
 	PJ_LOG(3,(THIS_FILE, "Data sent"));*/
 }
 
-
-static void *tcp_server(void *arg){
+/*
+ * SDP_tcp_server: receive SDP data using a TCP server.
+ */
+static void *sdp_tcp_server(void *arg){
     struct sockaddr_in serv_add;
-    int fd, conn_fd;
+    int fd;
     size_t nleft;
     int nread;
     ssize_t nwritten;
@@ -980,16 +990,19 @@ static void *tcp_server(void *arg){
     int cursor=0;
     int tr=1;
     
+    // if (tool_mode == UDP_MODE)
+    
     if ( (fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
 	    perror("Socket creation error");
 	    exit(1);
     }
-    memset((void *)&serv_add, 0, sizeof(serv_add)); /* clear server address */
-    serv_add.sin_family = AF_INET;                  /* address type is INET */
-    serv_add.sin_port = htons(tcp_server_port);     /* port is ... */
-    serv_add.sin_addr.s_addr = htonl(INADDR_ANY);   /* connect from anywhere */
     
-    if (setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&tr,sizeof(tr)) == -1) {
+    memset((void *)&serv_add, 0, sizeof(serv_add)); 
+    serv_add.sin_family = AF_INET;                  
+    serv_add.sin_port = htons(sdp_tcp_server_port);    
+    serv_add.sin_addr.s_addr = htonl(INADDR_ANY); 
+    
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &tr, sizeof(tr)) == -1) {
         perror("setsockopt");
         exit(1);
     }
@@ -1008,7 +1021,7 @@ static void *tcp_server(void *arg){
         perror("accept error");
         exit(1);
     }
-    printf("Connection accepted\n"); //buffer_data
+    printf("TCP Connection accepted\n"); //buffer_data
    
     pthread_mutex_lock(&lock_on_buffer_data);
     pthread_mutex_unlock(&lock_on_buffer_data);
@@ -1024,7 +1037,7 @@ static void *tcp_server(void *arg){
             }
         }
         nleft -= nwritten;          /* set left to write */
-        buf +=nwritten;             /* set pointer */
+        buf += nwritten;             /* set pointer */
     }
     while ( (nread = read(conn_fd, (recv_buff+cursor), (MAXLINE-cursor))) != 0) {
         cursor += nread;
@@ -1038,19 +1051,13 @@ static void *tcp_server(void *arg){
     }
     close(conn_fd);
 	close(fd);
+	pthread_exit(NULL);
 }
 
-static void iceauto_toolsrv(int type_offerer){
+static void iceauto_toolsrv() {
     static char buffer[MAXLINE];
-    socklen_t len;
-    char *type;
     int n;
     char tool_buffer[MAXLINE]; 
-    
-    if (type_offerer)
-        type = "o";
-    else
-        type = "a";
     
     /* create socket for later use UDP server */
     if ( (tool_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -1058,11 +1065,11 @@ static void iceauto_toolsrv(int type_offerer){
 	    exit(-1);
     }
     /* initialize address */
-    memset((void *)&tool_endpoint_addr, 0, sizeof(tool_endpoint_addr));     /* clear server address */
-    tool_endpoint_addr.sin_family = AF_INET;                  /* address type is INET */
-    if (type_offerer){
-        tool_endpoint_addr.sin_port = htons(tool_server_port);                  /* daytime port is 13 */
-        tool_endpoint_addr.sin_addr.s_addr = htonl(INADDR_ANY);   /* connect from anywhere */
+    memset((void *)&tool_endpoint_addr, 0, sizeof(tool_endpoint_addr));
+    tool_endpoint_addr.sin_family = AF_INET;
+    if (tool_control_mode == OFFERER){
+        tool_endpoint_addr.sin_port = htons(tool_server_port);
+        tool_endpoint_addr.sin_addr.s_addr = htonl(INADDR_ANY);
         
         /* bind socket */
         if (bind(tool_sock, (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
@@ -1092,7 +1099,7 @@ static void iceauto_toolsrv(int type_offerer){
     printf("Session initialization starting\n");
     pthread_mutex_lock(&lock_on_ice_init);
     pthread_mutex_unlock(&lock_on_ice_init);
-    icedemo_init_session(*type);
+    icedemo_init_session();
     
     printf("Session initialization completed\n");
     
@@ -1114,7 +1121,7 @@ static void iceauto_toolsrv(int type_offerer){
     strncpy(buffer_data, buffer, strlen(buffer));
     pthread_mutex_unlock(&lock_on_buffer_data);
     
-    pthread_join(tcp_server_tid, NULL);
+    pthread_join(sdp_tcp_server_tid, NULL);
     icedemo_input_remote(recv_buff);
     pthread_mutex_lock(&lock_on_ice_init);
     
@@ -1146,25 +1153,26 @@ static void icedemo_usage()
     printf("icedemo v%s by pjsip.org\nModded version!\n", pj_get_version());
     puts("");
     puts("General options:");
-    puts(" --comp-cnt, -c N          Component count (default=1)");
-    puts(" --nameserver, -n IP       Configure nameserver to activate DNS SRV");
-    puts("                           resolution");
-    puts(" --max-host, -H N          Set max number of host candidates to N");
-    puts(" --regular, -R             Use regular nomination (default aggressive)");
-    puts(" --log-file, -L FILE       Save output to log FILE");
-    puts(" --offerer, -o             Set the ICE mode as offerer (default behaviour)");
-    puts(" --answerer, -a            Set the ICE mode as answerer");
-    puts(" --sdp-tcp-port, -S N      Set the TCP server port to receive SDP information (default 7001)");
-    puts(" --offer-port, -O N        Set the UDP server port of the offerer (default 7002)");
-    puts(" --answ-port, -A N         Set the UDP client port of the answerer (default 7003)");
-    puts(" --answ-addr, -C HOST      Set the UDP client address of the answerer (default 7004)");
-    puts(" --tcp-mode, -P            Set the use of TCP instead of UDP for the tool client/server");
-    puts(" --help, -h                Display this screen.");
+    puts(" --comp-cnt, -c N      Component count (default=1)");
+    puts(" --nameserver, -n IP   Configure nameserver to activate DNS SRV");
+    puts("                       resolution");
+    puts(" --max-host, -H N      Set max number of host candidates to N");
+    puts(" --regular, -R         Use regular nomination (default aggressive)");
+    puts(" --log-file, -L FILE   Save output to log FILE");
+    puts(" --offerer, -o         Set the ICE mode as offerer (default behaviour)");
+    puts(" --answerer, -a        Set the ICE mode as answerer");
+    puts(" --sdp-tcp-port, -S N  Set the TCP server port to receive SDP information (default 7001)");
+    puts(" --offer-port, -O N    Set the UDP server port of the offerer (default 7002)");
+    puts(" --answ-port, -A N     Set the UDP client port of the answerer (default 7003)");
+    puts(" --answ-addr, -C HOST  Set the UDP client address of the answerer (default 7004)");
+    puts(" --tcp-mode, -P        Set the use of TCP instead of UDP for the tool client/server");
+    puts(" --help, -h            Display this screen.");
     puts("");
     puts("STUN related options:");
     puts(" --stun-srv, -s HOSTDOM    Enable srflx candidate by resolving to STUN server.");
     puts("                           HOSTDOM may be a \"host_or_ip[:port]\" or a domain");
     puts("                           name if DNS SRV resolution is used.");
+    puts("                           (example: stun.selbie.com)");
     puts("");
     puts("TURN related options:");
     puts(" --turn-srv, -t HOSTDOM    Enable relayed candidate by using this TURN server.");
@@ -1206,7 +1214,6 @@ int main(int argc, char *argv[])
     };
     int c, opt_id;
     pj_status_t status;
-    int type_offerer=1;
 
     icedemo.opt.comp_cnt = 1;
     icedemo.opt.max_host = -1;
@@ -1254,13 +1261,13 @@ int main(int argc, char *argv[])
 	            icedemo.opt.log_file = pj_optarg;
 	            break;
             case 'o':
-                type_offerer=1;
+                tool_control_mode = OFFERER;
                 break;
             case 'a':
-                type_offerer=0;
+                tool_control_mode = ANSWERER;
                 break;
             case 'S':
-                tcp_server_port = atoi(pj_optarg);
+                sdp_tcp_server_port = atoi(pj_optarg);
                 break;
             case 'O':
                 tool_server_port = atoi(pj_optarg);
@@ -1269,7 +1276,7 @@ int main(int argc, char *argv[])
                 tool_client_port = atoi(pj_optarg);
                 break;
             case 'C':
-                tool_client_address = pj_optarg;
+                tool_client_address = pj_optarg; //TODO
                 break;
             case 'P':
                 tool_mode = TCP_MODE;
@@ -1292,8 +1299,8 @@ int main(int argc, char *argv[])
     }
     pthread_mutex_lock(&lock_on_buffer_data);
     
-    pthread_create(&tcp_server_tid, NULL, tcp_server, NULL);
-    iceauto_toolsrv(type_offerer);
+    pthread_create(&sdp_tcp_server_tid, NULL, sdp_tcp_server, NULL);
+    iceauto_toolsrv();
     
     err_exit("Quitting..", PJ_SUCCESS);
     return 0;
