@@ -1,6 +1,6 @@
 /* 
  * Copyright (C) 2008-2011 Teluu Inc. (http://www.teluu.com)
- * Copyright (C) 2012 Daniele Iamartino <danieleiamartino at gmail.com>
+ * Copyright (C) 2013 Daniele Iamartino <danieleiamartino at gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,10 +33,12 @@ pthread_mutex_t lock_on_ice_init, lock_on_buffer_data;
 pthread_t sdp_tcp_server_tid;
 
 #define MAXLINE 65536
+#define BACKLOG 10
 
 char buffer_data[MAXLINE] = {0};
 char recv_buff[MAXLINE] = {0};
 int tool_sock;
+int tool_sock_conn;
 struct sockaddr_in tool_endpoint_addr;
 socklen_t len;
 
@@ -256,15 +258,34 @@ static void cb_on_rx_data(pj_ice_strans *ice_st,
 			  unsigned src_addr_len)
 {
     char ipstr[PJ_INET6_ADDRSTRLEN+10];
+    unsigned int nleft = (unsigned) size;
+    int nwritten;
+    char *buf;
 
     PJ_UNUSED_ARG(ice_st);
     PJ_UNUSED_ARG(src_addr_len);
     PJ_UNUSED_ARG(pkt);
-	      
-    if ( sendto(tool_sock, (char*)pkt, (unsigned)size, 0, 
-	       (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
-        perror("UDP socket sendto error");
-        exit(-1);
+
+    if (tool_mode == UDP_MODE) {
+        if ( sendto(tool_sock, (char*)pkt, nleft, 0,
+               (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
+            perror("UDP socket sendto error");
+            exit(-1);
+        }
+    }
+    else {
+        buf = (char*)pkt;
+        while (nleft > 0) {
+            if ( (nwritten = write(tool_sock_conn, buf, nleft)) < 0) {
+                if (errno == EINTR) {
+                    continue;
+                } else {
+                    perror("error on socket write");
+                }
+            }
+            nleft -= nwritten;
+            buf += nwritten;
+        }
     }
 }
 
@@ -962,7 +983,7 @@ static void icedemo_send_data(unsigned comp_id, const char *data, unsigned int l
 	    return;
     }
 
-    if (comp_id < 1||comp_id > pj_ice_strans_get_running_comp_cnt(icedemo.icest)) {
+    if (comp_id < 1 || comp_id > pj_ice_strans_get_running_comp_cnt(icedemo.icest)) {
 	    PJ_LOG(1,(THIS_FILE, "Error: invalid component ID"));
 	    return;
     }
@@ -986,16 +1007,14 @@ static void *sdp_tcp_server(void *arg){
     int nread;
     ssize_t nwritten;
     char *buf;
-    
     int cursor=0;
     int tr=1;
     
-    // if (tool_mode == UDP_MODE)
     
-    if ( (fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-	    perror("Socket creation error");
-	    exit(1);
-    }
+	if ( (fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		perror("Socket creation error");
+		exit(1);
+	}
     
     memset((void *)&serv_add, 0, sizeof(serv_add)); 
     serv_add.sin_family = AF_INET;                  
@@ -1058,11 +1077,24 @@ static void iceauto_toolsrv() {
     static char buffer[MAXLINE];
     int n;
     char tool_buffer[MAXLINE]; 
+    int tr=1;
     
-    /* create socket for later use UDP server */
-    if ( (tool_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-	    perror("Socket creation error");
-	    exit(-1);
+    if (tool_mode == UDP_MODE) {
+        /* create socket for later use UDP server */
+        if ((tool_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+            perror("Tool Socket creation error");
+            exit(-1);
+        }
+    }
+    else {
+        if ((tool_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+            perror("Tool Socket creation error");
+            exit(-1);
+        }
+        if (setsockopt(tool_sock, SOL_SOCKET, SO_REUSEADDR, &tr, sizeof(tr)) == -1) {
+            perror("Tool setsockopt error");
+            exit(1);
+        }
     }
     /* initialize address */
     memset((void *)&tool_endpoint_addr, 0, sizeof(tool_endpoint_addr));
@@ -1073,13 +1105,20 @@ static void iceauto_toolsrv() {
         
         /* bind socket */
         if (bind(tool_sock, (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
-	        perror("bind error");
+	        perror("Tool socket bind error");
 	        exit(-1);
+        }
+
+        if (tool_mode == TCP_MODE){
+            if (listen(tool_sock, BACKLOG) < 0 ) {
+                perror("Tool socket listen error");
+                exit(1);
+            }
         }
     }
     else {
         tool_endpoint_addr.sin_port = htons(tool_client_port); 
-        if ( (inet_pton(AF_INET, tool_client_address, &tool_endpoint_addr.sin_addr)) <= 0) {
+        if ((inet_pton(AF_INET, tool_client_address, &tool_endpoint_addr.sin_addr)) <= 0) {
 	        perror("Address creation error");
 	        exit(-1);
         }
@@ -1129,16 +1168,30 @@ static void iceauto_toolsrv() {
     pthread_mutex_lock(&lock_on_ice_init);
     pthread_mutex_unlock(&lock_on_ice_init);
     
-    while (1) {
-        len = sizeof(tool_endpoint_addr);
-	    n = recvfrom(tool_sock, tool_buffer, MAXLINE, 0, 
-	            (struct sockaddr *)&tool_endpoint_addr, &len);
-	    if (n < 0) {
-	        perror("recvfrom error");
-	        exit(-1);
-	    }
-	    
-	    icedemo_send_data(1, tool_buffer, n);
+    if (tool_mode == TCP_MODE) {
+        while (1) {
+            if ( (tool_sock_conn = accept(tool_sock, NULL, NULL)) < 0) {
+                    perror("Accept error");
+                    exit(1);
+            }
+            while ((n = read(tool_sock_conn, tool_buffer, MAXLINE)) != 0) {
+                icedemo_send_data(1, tool_buffer, n);
+            }
+        }
+        //TODO: Connection end?
+    }
+    else {
+        while (1) {
+            len = sizeof(tool_endpoint_addr);
+            n = recvfrom(tool_sock, tool_buffer, MAXLINE, 0,
+                    (struct sockaddr *)&tool_endpoint_addr, &len);
+            if (n < 0) {
+                perror("recvfrom error");
+                exit(-1);
+            }
+
+            icedemo_send_data(1, tool_buffer, n);
+        }
     }
 }
 
