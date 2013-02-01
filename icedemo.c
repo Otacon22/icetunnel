@@ -40,7 +40,6 @@ char recv_buff[MAXLINE] = {0};
 int tool_sock;
 int tool_sock_conn;
 struct sockaddr_in tool_endpoint_addr;
-socklen_t len;
 
 int sdp_tcp_server_port = 7001;
 int tool_server_port = 7002;
@@ -1078,8 +1077,11 @@ static void iceauto_toolsrv() {
     int n;
     char tool_buffer[MAXLINE]; 
     int tr=1;
+    socklen_t addr_len;
     
     if (tool_mode == UDP_MODE) {
+        printf("Starting the tool server in UDP mode\n");
+
         /* create socket for later use UDP server */
         if ((tool_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
             perror("Tool Socket creation error");
@@ -1087,6 +1089,8 @@ static void iceauto_toolsrv() {
         }
     }
     else {
+        printf("Starting the tool server in TCP mode\n");
+
         if ((tool_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
             perror("Tool Socket creation error");
             exit(-1);
@@ -1103,6 +1107,7 @@ static void iceauto_toolsrv() {
         tool_endpoint_addr.sin_port = htons(tool_server_port);
         tool_endpoint_addr.sin_addr.s_addr = htonl(INADDR_ANY);
         
+        printf("Binding tool socket\n");
         /* bind socket */
         if (bind(tool_sock, (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
 	        perror("Tool socket bind error");
@@ -1110,6 +1115,7 @@ static void iceauto_toolsrv() {
         }
 
         if (tool_mode == TCP_MODE){
+            printf("Setting the listen on the tool socket\n");
             if (listen(tool_sock, BACKLOG) < 0 ) {
                 perror("Tool socket listen error");
                 exit(1);
@@ -1142,16 +1148,8 @@ static void iceauto_toolsrv() {
     
     printf("Session initialization completed\n");
     
-    
-    printf("Showing info...\n");
-    
-    if (!pj_ice_strans_has_sess(icedemo.icest)) {
-	    puts("Create the session first to see more info");
-	    exit(1);
-    }
-    
-    len = encode_session(buffer, sizeof(buffer));
-    if (len < 0){
+    n = encode_session(buffer, sizeof(buffer));
+    if (n < 0){
         printf("Buffer size error\n");
         exit(1);
     }
@@ -1164,32 +1162,41 @@ static void iceauto_toolsrv() {
     icedemo_input_remote(recv_buff);
     pthread_mutex_lock(&lock_on_ice_init);
     
+    printf("Starting the ICE negotiation\n");
     icedemo_start_nego();
     pthread_mutex_lock(&lock_on_ice_init);
     pthread_mutex_unlock(&lock_on_ice_init);
     
-    len = sizeof(tool_endpoint_addr);
+    addr_len = sizeof(tool_endpoint_addr);
 
     if (tool_mode == TCP_MODE) {
         while (1) {
             if (tool_control_mode == OFFERER) {
+                printf("Tool socket (TCP), invoking the accept call\n");
                 if ( (tool_sock_conn = accept(tool_sock, NULL, NULL)) < 0) {
                         perror("Accept error");
                         exit(1);
                 }
             }
             else {
-                if (connect(tool_sock, (struct sockaddr *)&tool_endpoint_addr, len) < 0){
-                    perror("Connection error");
-                    exit(1);
+                printf("Tool socket (TCP), invoking the connect call\n");
+                while (( n = connect(tool_sock, (struct sockaddr *)&tool_endpoint_addr, addr_len)) < 0){
+                    if (n != ECONNREFUSED) {
+                        perror("Connection error");
+                        exit(1);
+                    }
+                    sleep(1);
                 }
                 tool_sock_conn = tool_sock;
             }
+            printf("Tool socket (TCP) connected, reading and forwarding data.\n");
             while ((n = read(tool_sock_conn, tool_buffer, MAXLINE)) != 0) {
                 icedemo_send_data(1, tool_buffer, n);
             }
+            printf("Tool socket (TCP) disconnected, closing connection\n");
             close(tool_sock_conn);
             if (tool_control_mode == ANSWERER){
+                printf("Tool socket (TCP) reconnection: re-creation of socket\n");
                 if ((tool_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
                     perror("Tool Socket creation error");
                     exit(-1);
@@ -1198,10 +1205,11 @@ static void iceauto_toolsrv() {
         }
         //TODO: Connection end?
     }
-    else {
+    else { // UDP mode
+        printf("Tool socket (UDP) ready to read and forward data.\n");
         while (1) {
             n = recvfrom(tool_sock, tool_buffer, MAXLINE, 0,
-                    (struct sockaddr *)&tool_endpoint_addr, &len);
+                    (struct sockaddr *)&tool_endpoint_addr, &addr_len);
             if (n < 0) {
                 perror("recvfrom error");
                 exit(-1);
