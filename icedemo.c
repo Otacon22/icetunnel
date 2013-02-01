@@ -1188,6 +1188,13 @@ static void iceauto_toolsrv() {
             while ((n = read(tool_sock_conn, tool_buffer, MAXLINE)) != 0) {
                 icedemo_send_data(1, tool_buffer, n);
             }
+            close(tool_sock_conn);
+            if (tool_control_mode == ANSWERER){
+                if ((tool_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+                    perror("Tool Socket creation error");
+                    exit(-1);
+                }
+            }
         }
         //TODO: Connection end?
     }
