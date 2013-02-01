@@ -1168,11 +1168,22 @@ static void iceauto_toolsrv() {
     pthread_mutex_lock(&lock_on_ice_init);
     pthread_mutex_unlock(&lock_on_ice_init);
     
+    len = sizeof(tool_endpoint_addr);
+
     if (tool_mode == TCP_MODE) {
         while (1) {
-            if ( (tool_sock_conn = accept(tool_sock, NULL, NULL)) < 0) {
-                    perror("Accept error");
+            if (tool_control_mode == OFFERER) {
+                if ( (tool_sock_conn = accept(tool_sock, NULL, NULL)) < 0) {
+                        perror("Accept error");
+                        exit(1);
+                }
+            }
+            else {
+                if (connect(tool_sock, (struct sockaddr *)&tool_endpoint_addr, len) < 0){
+                    perror("Connection error");
                     exit(1);
+                }
+                tool_sock_conn = tool_sock;
             }
             while ((n = read(tool_sock_conn, tool_buffer, MAXLINE)) != 0) {
                 icedemo_send_data(1, tool_buffer, n);
@@ -1182,7 +1193,6 @@ static void iceauto_toolsrv() {
     }
     else {
         while (1) {
-            len = sizeof(tool_endpoint_addr);
             n = recvfrom(tool_sock, tool_buffer, MAXLINE, 0,
                     (struct sockaddr *)&tool_endpoint_addr, &len);
             if (n < 0) {
