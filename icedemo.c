@@ -46,7 +46,14 @@ int tool_server_port = 7002;
 int tool_client_port = 7003;
 char *tool_client_address = "127.0.0.1";
 
-int conn_fd; /* TCP connection socket, shared for sending errors */
+int sdp_conn_fd; /* TCP connection socket, shared for sending errors */
+
+int verbose = 0;
+
+enum connection_status {
+    ESTABLISHED,
+    CLOSED
+} tool_conn_status = CLOSED;
 
 enum working_modes {
     UDP_MODE,
@@ -60,13 +67,12 @@ enum control_mode {
 
 
 
+#define THIS_FILE   "icedemo"
 
-#define THIS_FILE   "icedemo.c"
-
-/* For this demo app, configure longer STUN keep-alive time
- * so that it does't clutter the screen output.
+/*
+ * STUN keep-alive time, default value 15 seconds
  */
-#define KA_INTERVAL 300
+#define KA_INTERVAL 15
 
 
 /* This is our global variables */
@@ -85,17 +91,17 @@ static struct app_t
 	    pj_str_t    turn_username;
 	    pj_str_t    turn_password;
 	    pj_bool_t   turn_fingerprint;
-	    const char *log_file;
+	    unsigned   max_pkt_size;
     } opt;
 
     /* Our global variables */
     pj_caching_pool	 cp;
     pj_pool_t		*pool;
     pj_thread_t		*thread;
+    pj_thread_t     *sdp_thread;
     pj_bool_t		 thread_quit_flag;
     pj_ice_strans_cfg	 ice_cfg;
     pj_ice_strans	*icest;
-    FILE		*log_fhnd;
 
     /* Variables to store parsed remote ICE info */
     struct rem_info
@@ -109,6 +115,29 @@ static struct app_t
     } rem;
 
 } icedemo;
+
+static int socketWrite(int socket_fd, char *buffer, size_t bufsize){
+    int nleft = bufsize;
+    int nwritten;
+
+    while (nleft > 0) {
+        if ((nwritten = write(socket_fd, buffer, nleft)) < 0) {
+            if (errno == EINTR) {
+                continue;
+            } else {
+                return nwritten; /* Return the error */
+            }
+        }
+        nleft -= nwritten;
+        buffer += nwritten;
+    }
+    return 0;
+}
+
+static int socketRead(int socket_fd, char *buffer, size_t bufsize){
+    return read(socket_fd, buffer, bufsize);
+}
+
 
 /* Utility to display error messages */
 static void icedemo_perror(const char *title, pj_status_t status)
@@ -150,10 +179,6 @@ static void err_exit(const char *title, pj_status_t status)
 
     pj_shutdown();
 
-    if (icedemo.log_fhnd) {
-	    fclose(icedemo.log_fhnd);
-	    icedemo.log_fhnd = NULL;
-    }
 
     exit(status != PJ_SUCCESS);
 }
@@ -257,34 +282,22 @@ static void cb_on_rx_data(pj_ice_strans *ice_st,
 			  unsigned src_addr_len)
 {
     char ipstr[PJ_INET6_ADDRSTRLEN+10];
-    unsigned int nleft = (unsigned) size;
     int nwritten;
-    char *buf;
 
     PJ_UNUSED_ARG(ice_st);
     PJ_UNUSED_ARG(src_addr_len);
     PJ_UNUSED_ARG(pkt);
 
     if (tool_mode == UDP_MODE) {
-        if ( sendto(tool_sock, (char*)pkt, nleft, 0,
+        if ( sendto(tool_sock, (char*)pkt, (unsigned)size, 0,
                (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
             perror("UDP socket sendto error");
             exit(-1);
         }
     }
-    else { //TODO: add the connection status so we don't send messages while disconnected
-        buf = (char*)pkt;
-        while (nleft > 0) {
-            if ( (nwritten = write(tool_sock_conn, buf, nleft)) < 0) {
-                if (errno == EINTR) {
-                    continue;
-                } else {
-                    perror("error on socket write");
-                }
-            }
-            nleft -= nwritten;
-            buf += nwritten;
-        }
+    else if (tool_conn_status == ESTABLISHED) {
+        if (socketWrite(tool_sock_conn, (char *)pkt, (unsigned)size) < 0)
+            perror("error on socket write");
     }
 }
 
@@ -299,32 +312,40 @@ static void cb_on_ice_complete(pj_ice_strans *ice_st,
     const char *opname = 
 	(op==PJ_ICE_STRANS_OP_INIT? "initialization" :
 	    (op==PJ_ICE_STRANS_OP_NEGOTIATION ? "negotiation" : "unknown_op"));
+    char *message = "ICE negotiation completed\n";
+    char *fail_message = "Error ";
 
     if (status == PJ_SUCCESS) {
-    	PJ_LOG(3,(THIS_FILE, "ICE %s successful", opname));
+    	PJ_LOG(3,(THIS_FILE, "ICE %s successful", opname)); //TODO verbose
     	
+    	if(op == PJ_ICE_STRANS_OP_NEGOTIATION) {
+    	    if (socketWrite(sdp_conn_fd, message, strlen(message)) < 0){
+    	        perror("error on socket write");
+    	    }
+    	    close(sdp_conn_fd);
+    	}
+
     } else {
 	    char errmsg[PJ_ERR_MSG_SIZE];
 
 	    pj_strerror(status, errmsg, sizeof(errmsg));
 	    PJ_LOG(1,(THIS_FILE, "ICE %s failed: %s", opname, errmsg));
+
 	    pj_ice_strans_destroy(ice_st);
 	    icedemo.icest = NULL;
+	    if (socketWrite(sdp_conn_fd, fail_message, strlen(fail_message)) < 0){
+	        perror("error on socket write");
+        }
+	    if (socketWrite(sdp_conn_fd, errmsg, strlen(errmsg)) < 0){
+	                perror("error on socket write");
+        }
+        close(sdp_conn_fd);
     }
-    if (op==PJ_ICE_STRANS_OP_INIT)
-	    pthread_mutex_unlock(&lock_on_ice_init);
-    if (op==PJ_ICE_STRANS_OP_NEGOTIATION)
-        pthread_mutex_unlock(&lock_on_ice_init);
-}
 
-/* log callback to write to file */
-static void log_func(int level, const char *data, int len)
-{
-    pj_log_write(level, data, len);
-    if (icedemo.log_fhnd) {
-	    if (fwrite(data, len, 1, icedemo.log_fhnd) != 1)
-	        return;
-    }
+    if (op == PJ_ICE_STRANS_OP_INIT)
+	    pthread_mutex_unlock(&lock_on_ice_init);
+    if (op == PJ_ICE_STRANS_OP_NEGOTIATION)
+        pthread_mutex_unlock(&lock_on_ice_init);
 }
 
 /*
@@ -335,11 +356,6 @@ static void log_func(int level, const char *data, int len)
 static pj_status_t icedemo_init(void)
 {
     pj_status_t status;
-
-    if (icedemo.opt.log_file) {
-	    icedemo.log_fhnd = fopen(icedemo.opt.log_file, "a");
-	    pj_log_set_log_func(&log_func);
-    }
 
     /* Initialize the libraries before anything else */
     CHECK( pj_init() );
@@ -419,39 +435,8 @@ static pj_status_t icedemo_init(void)
 	     * so that it does't clutter the screen output.
 	     */
 	    icedemo.ice_cfg.stun.cfg.ka_interval = KA_INTERVAL;
-    }
 
-    /* Configure TURN candidate */
-    if (icedemo.opt.turn_srv.slen) {
-	    char *pos;
-
-	    /* Command line option may contain port number */
-	    if ((pos=pj_strchr(&icedemo.opt.turn_srv, ':')) != NULL) {
-	        icedemo.ice_cfg.turn.server.ptr = icedemo.opt.turn_srv.ptr;
-	        icedemo.ice_cfg.turn.server.slen = (pos - icedemo.opt.turn_srv.ptr);
-
-	        icedemo.ice_cfg.turn.port = (pj_uint16_t)atoi(pos+1);
-	    } else {
-	        icedemo.ice_cfg.turn.server = icedemo.opt.turn_srv;
-	        icedemo.ice_cfg.turn.port = PJ_STUN_PORT;
-	    }
-
-	    /* TURN credential */
-	    icedemo.ice_cfg.turn.auth_cred.type = PJ_STUN_AUTH_CRED_STATIC;
-	    icedemo.ice_cfg.turn.auth_cred.data.static_cred.username = icedemo.opt.turn_username;
-	    icedemo.ice_cfg.turn.auth_cred.data.static_cred.data_type = PJ_STUN_PASSWD_PLAIN;
-	    icedemo.ice_cfg.turn.auth_cred.data.static_cred.data = icedemo.opt.turn_password;
-
-	    /* Connection type to TURN server */
-	    if (icedemo.opt.turn_tcp)
-	        icedemo.ice_cfg.turn.conn_type = PJ_TURN_TP_TCP;
-	    else
-	        icedemo.ice_cfg.turn.conn_type = PJ_TURN_TP_UDP;
-
-	    /* For this demo app, configure longer keep-alive time
-	     * so that it does't clutter the screen output.
-	     */
-	    icedemo.ice_cfg.turn.alloc_param.ka_interval = KA_INTERVAL;
+	    icedemo.ice_cfg.stun.cfg.max_pkt_size = icedemo.opt.max_pkt_size;
     }
 
     /* -= That's it for now, initialization is complete =- */
@@ -707,7 +692,7 @@ static void icedemo_input_remote(char *data)
     pj_bool_t done = PJ_FALSE;
     char *rest;
 
-    printf("\nComplete data received from user:\n%s\n",data);
+    //printf("\nComplete data received from user:\n%s\n",data);
 
     reset_rem_info();
 
@@ -895,7 +880,7 @@ static void icedemo_input_remote(char *data)
 	    goto on_error;
     }
 
-    if (comp0_port==0 || comp0_addr[0]=='\0') {
+    if (comp0_port == 0 || comp0_addr[0] == '\0') {
 	    PJ_LOG(1, (THIS_FILE, "Error: default address for component 0 not found"));
 	    goto on_error;
     } else {
@@ -999,18 +984,17 @@ static void icedemo_send_data(unsigned comp_id, const char *data, unsigned int l
 /*
  * SDP_tcp_server: receive SDP data using a TCP server.
  */
-static void *sdp_tcp_server(void *arg){
+static int sdp_tcp_server(void *arg){
     struct sockaddr_in serv_add;
-    int fd;
+    int sdp_sock_fd;
     size_t nleft;
     int nread;
     ssize_t nwritten;
-    char *buf;
-    int cursor=0;
-    int tr=1;
+    int cursor = 0;
+    int tr = 1;
     
     
-	if ( (fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+	if ( (sdp_sock_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
 		perror("Socket creation error");
 		exit(1);
 	}
@@ -1020,44 +1004,37 @@ static void *sdp_tcp_server(void *arg){
     serv_add.sin_port = htons(sdp_tcp_server_port);    
     serv_add.sin_addr.s_addr = htonl(INADDR_ANY); 
     
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &tr, sizeof(tr)) == -1) {
+    if (setsockopt(sdp_sock_fd, SOL_SOCKET, SO_REUSEADDR, &tr, sizeof(tr)) == -1) {
         perror("setsockopt");
         exit(1);
     }
     
-    if (bind(fd, (struct sockaddr *)&serv_add, sizeof(serv_add)) < 0) {
+    if (bind(sdp_sock_fd, (struct sockaddr *)&serv_add, sizeof(serv_add)) < 0) {
 	    perror("bind error");
 	    exit(1);
     }
-    if (listen(fd, 10) < 0 ) {
+    if (listen(sdp_sock_fd, 10) < 0 ) {
 	    perror("listen error");
 	    exit(1);
     }
     
 	/* accept connection */
-    if ( (conn_fd = accept(fd, NULL, NULL)) < 0) {
+    if ( (sdp_conn_fd = accept(sdp_sock_fd, NULL, NULL)) < 0) {
         perror("accept error");
         exit(1);
     }
-    printf("TCP Connection accepted\n"); //buffer_data
+    PJ_LOG(1,(THIS_FILE, "TCP Connection accepted"));
    
     pthread_mutex_lock(&lock_on_buffer_data);
     pthread_mutex_unlock(&lock_on_buffer_data);
-    buf = buffer_data;
     
-    nleft = strlen(buffer_data);
-    while (nleft > 0) {             /* repeat until no left */
-        if ( (nwritten = write(conn_fd, buf, nleft)) < 0) {
-            if (errno == EINTR) {   /* if interrupted by system call */
-	            continue;           /* repeat the loop */
-            } else {
-	            perror("error on socket write");   /* otherwise exit with error */
-            }
-        }
-        nleft -= nwritten;          /* set left to write */
-        buf += nwritten;             /* set pointer */
+
+    /* We use strlen because we know that the buffer is zero-ended */
+    if (socketWrite(sdp_conn_fd, buffer_data, strlen(buffer_data)) < 0){
+        perror("error on socket write");
     }
-    while ( (nread = read(conn_fd, (recv_buff+cursor), (MAXLINE-cursor))) != 0) {
+
+    while ( (nread = socketRead(sdp_conn_fd, (recv_buff+cursor), (MAXLINE-cursor))) != 0) {
         cursor += nread;
         if(cursor >= MAXLINE){
             perror("recv buffer full");
@@ -1067,20 +1044,19 @@ static void *sdp_tcp_server(void *arg){
             break;
         }
     }
-    close(conn_fd);
-	close(fd);
-	pthread_exit(NULL);
+	close(sdp_sock_fd); /* Close the main socket but not the connection */
+
+	return 0;
 }
 
 static void iceauto_toolsrv() {
-    static char buffer[MAXLINE];
     int n;
     char tool_buffer[MAXLINE]; 
     int tr=1;
     socklen_t addr_len;
     
     if (tool_mode == UDP_MODE) {
-        printf("Starting the tool server in UDP mode\n");
+        PJ_LOG(1,(THIS_FILE, "Starting the tool server in UDP mode"));
 
         /* create socket for later use UDP server */
         if ((tool_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -1089,7 +1065,7 @@ static void iceauto_toolsrv() {
         }
     }
     else {
-        printf("Starting the tool server in TCP mode\n");
+        PJ_LOG(1,(THIS_FILE, "Starting the tool server in TCP mode"));
 
         if ((tool_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
             perror("Tool Socket creation error");
@@ -1107,7 +1083,7 @@ static void iceauto_toolsrv() {
         tool_endpoint_addr.sin_port = htons(tool_server_port);
         tool_endpoint_addr.sin_addr.s_addr = htonl(INADDR_ANY);
         
-        printf("Binding tool socket\n");
+        PJ_LOG(1,(THIS_FILE, "Binding tool socket"));
         /* bind socket */
         if (bind(tool_sock, (struct sockaddr *)&tool_endpoint_addr, sizeof(tool_endpoint_addr)) < 0) {
 	        perror("Tool socket bind error");
@@ -1115,7 +1091,7 @@ static void iceauto_toolsrv() {
         }
 
         if (tool_mode == TCP_MODE){
-            printf("Setting the listen on the tool socket\n");
+            PJ_LOG(1,(THIS_FILE, "Setting the listen on the tool socket"));
             if (listen(tool_sock, BACKLOG) < 0 ) {
                 perror("Tool socket listen error");
                 exit(1);
@@ -1138,31 +1114,30 @@ static void iceauto_toolsrv() {
     }
     pthread_mutex_lock(&lock_on_ice_init);
     
-    printf("Creating ICE instance\n");
+    PJ_LOG(1,(THIS_FILE, "Creating ICE instance"));
     icedemo_create_instance();
     
-    printf("Session initialization starting\n");
+    PJ_LOG(1,(THIS_FILE, "Starting session initialization"));
     pthread_mutex_lock(&lock_on_ice_init);
     pthread_mutex_unlock(&lock_on_ice_init);
     icedemo_init_session();
     
-    printf("Session initialization completed\n");
     
-    n = encode_session(buffer, sizeof(buffer));
+    n = encode_session(tool_buffer, sizeof(tool_buffer));
     if (n < 0){
-        printf("Buffer size error\n");
+        printf("Buffer size error\n"); //TODO
         exit(1);
     }
-    printf("Info host:\n%s\n", buffer);
 
-    strncpy(buffer_data, buffer, strlen(buffer));
+    strncpy(buffer_data, tool_buffer, MAXLINE);
     pthread_mutex_unlock(&lock_on_buffer_data);
     
-    pthread_join(sdp_tcp_server_tid, NULL);
+    pj_thread_join(icedemo.sdp_thread);
+    pj_thread_destroy(icedemo.sdp_thread);
     icedemo_input_remote(recv_buff);
     pthread_mutex_lock(&lock_on_ice_init);
     
-    printf("Starting the ICE negotiation\n");
+    PJ_LOG(1,(THIS_FILE, "Starting the ICE negotiation"));
     icedemo_start_nego();
     pthread_mutex_lock(&lock_on_ice_init);
     pthread_mutex_unlock(&lock_on_ice_init);
@@ -1172,28 +1147,34 @@ static void iceauto_toolsrv() {
     if (tool_mode == TCP_MODE) {
         while (1) {
             if (tool_control_mode == OFFERER) {
-                printf("Tool socket (TCP), invoking the accept call\n");
+                PJ_LOG(1,(THIS_FILE, "Tool socket (TCP), invoking the accept call"));
                 if ( (tool_sock_conn = accept(tool_sock, NULL, NULL)) < 0) {
                         perror("Accept error");
                         exit(1);
                 }
+                tool_conn_status = ESTABLISHED;
             }
             else {
-                printf("Tool socket (TCP), invoking the connect call\n");
+                PJ_LOG(1,(THIS_FILE, "Tool socket (TCP), invoking the connect call"));
                 while (( n = connect(tool_sock, (struct sockaddr *)&tool_endpoint_addr, addr_len)) < 0){
                     perror("Connection error");
                     sleep(1);
                 }
                 tool_sock_conn = tool_sock;
+                tool_conn_status = ESTABLISHED;
             }
-            printf("Tool socket (TCP) connected, reading and forwarding data.\n");
+
+            PJ_LOG(1,(THIS_FILE, "Tool socket (TCP) connected, reading and forwarding data."));
             while ((n = read(tool_sock_conn, tool_buffer, MAXLINE)) != 0) {
                 icedemo_send_data(1, tool_buffer, n);
             }
-            printf("Tool socket (TCP) disconnected, closing connection\n");
+
+            PJ_LOG(1,(THIS_FILE, "Tool socket (TCP) disconnected, closing connection"));
             close(tool_sock_conn);
+            tool_conn_status = CLOSED;
+
             if (tool_control_mode == ANSWERER){
-                printf("Tool socket (TCP) reconnection: re-creation of socket\n");
+                PJ_LOG(1,(THIS_FILE, "Tool socket (TCP) reconnection: re-creation of socket"));
                 if ((tool_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
                     perror("Tool Socket creation error");
                     exit(-1);
@@ -1203,7 +1184,7 @@ static void iceauto_toolsrv() {
         //TODO: Connection end?
     }
     else { // UDP mode
-        printf("Tool socket (UDP) ready to read and forward data.\n");
+        PJ_LOG(1,(THIS_FILE, "Tool socket (UDP) ready to read and forward data."));
         while (1) {
             n = recvfrom(tool_sock, tool_buffer, MAXLINE, 0,
                     (struct sockaddr *)&tool_endpoint_addr, &addr_len);
@@ -1224,8 +1205,8 @@ static void iceauto_toolsrv() {
  */
 static void icedemo_usage()
 {
-    puts("Usage: icedemo [optons]");
-    printf("icedemo v%s by pjsip.org\nModded version!\n", pj_get_version());
+    puts("Usage: icedemo [options]");
+    printf("icedemo v%s by pjsip.org\nModded version by Otacon22!\n", pj_get_version());
     puts("");
     puts("General options:");
     puts(" --comp-cnt, -c N      Component count (default=1)");
@@ -1233,7 +1214,6 @@ static void icedemo_usage()
     puts("                       resolution");
     puts(" --max-host, -H N      Set max number of host candidates to N");
     puts(" --regular, -R         Use regular nomination (default aggressive)");
-    puts(" --log-file, -L FILE   Save output to log FILE");
     puts(" --offerer, -o         Set the ICE mode as offerer (default behaviour)");
     puts(" --answerer, -a        Set the ICE mode as answerer");
     puts(" --sdp-tcp-port, -S N  Set the TCP server port to receive SDP information (default 7001)");
@@ -1241,22 +1221,15 @@ static void icedemo_usage()
     puts(" --answ-port, -A N     Set the UDP client port of the answerer (default 7003)");
     puts(" --answ-addr, -C HOST  Set the UDP client address of the answerer (default 7004)");
     puts(" --tcp-mode, -P        Set the use of TCP instead of UDP for the tool client/server");
+    puts(" --max-pkt-size, -Z N  Set the max packet size for the STUN messages (default 2000 bytes)");
+    puts(" --verbose, -v         Verbose mode");
     puts(" --help, -h            Display this screen.");
     puts("");
     puts("STUN related options:");
     puts(" --stun-srv, -s HOSTDOM    Enable srflx candidate by resolving to STUN server.");
     puts("                           HOSTDOM may be a \"host_or_ip[:port]\" or a domain");
     puts("                           name if DNS SRV resolution is used.");
-    puts("                           (example: stun.selbie.com)");
-    puts("");
-    puts("TURN related options:");
-    puts(" --turn-srv, -t HOSTDOM    Enable relayed candidate by using this TURN server.");
-    puts("                           HOSTDOM may be a \"host_or_ip[:port]\" or a domain");
-    puts("                           name if DNS SRV resolution is used.");
-    puts(" --turn-tcp, -T            Use TCP to connect to TURN server");
-    puts(" --turn-username, -u UID   Set TURN username of the credential to UID");
-    puts(" --turn-password, -p PWD   Set password of the credential to WPWD");
-    puts(" --turn-fingerprint, -F    Use fingerprint for outgoing TURN requests");
+    puts("                           (example: stun.selbie.com or stunserver.org)");
     puts("");
 }
 
@@ -1272,13 +1245,7 @@ int main(int argc, char *argv[])
 	{ "max-host",           1, 0, 'H'},
 	{ "help",               0, 0, 'h'},
 	{ "stun-srv",           1, 0, 's'},
-	{ "turn-srv",           1, 0, 't'},
-	{ "turn-tcp",           0, 0, 'T'},
-	{ "turn-username",      1, 0, 'u'},
-	{ "turn-password",      1, 0, 'p'},
-	{ "turn-fingerprint",   0, 0, 'F'},
 	{ "regular",            0, 0, 'R'},
-	{ "log-file",           1, 0, 'L'},
 	{ "offerer",            0, 0, 'o'},
 	{ "answerer",           0, 0, 'a'},
 	{ "sdp-tcp-port",       1, 0, 'S'},
@@ -1286,20 +1253,25 @@ int main(int argc, char *argv[])
 	{ "answ-port",          1, 0, 'A'},
 	{ "answ-addr",          1, 0, 'C'},
 	{ "tcp-mode",           0, 0, 'P'},
+	{ "max-pkt-size",       1, 0, 'Z'},
+	{ "verbose",            0, 0, 'v'},
     };
     int c, opt_id;
     pj_status_t status;
 
     icedemo.opt.comp_cnt = 1;
     icedemo.opt.max_host = -1;
+    icedemo.opt.max_pkt_size = 2000;
 
-    while((c=pj_getopt_long(argc,argv, "c:n:s:t:u:p:H:L:S:O:A:C:PhTFRoa", long_options, &opt_id)) != -1) {
+    while((c = pj_getopt_long(argc,argv, "c:n:s:H:S:O:A:C:Z:PhRoav",
+            long_options, &opt_id)) != -1) {
 	    switch (c) {
 	        case 'c':
 	            icedemo.opt.comp_cnt = atoi(pj_optarg);
-	            if (icedemo.opt.comp_cnt < 1 || icedemo.opt.comp_cnt >= PJ_ICE_MAX_COMP) {
-		        puts("Invalid component count value");
-		        return 1;
+	            if (icedemo.opt.comp_cnt < 1 ||
+	                    icedemo.opt.comp_cnt >= PJ_ICE_MAX_COMP) {
+                    puts("Invalid component count value");
+                    return 1;
 	            }
 	            break;
 	        case 'n':
@@ -1314,26 +1286,8 @@ int main(int argc, char *argv[])
 	        case 's':
 	            icedemo.opt.stun_srv = pj_str(pj_optarg);
 	            break;
-	        case 't':
-	            icedemo.opt.turn_srv = pj_str(pj_optarg);
-	            break;
-	        case 'T':
-	            icedemo.opt.turn_tcp = PJ_TRUE;
-	            break;
-	        case 'u':
-	            icedemo.opt.turn_username = pj_str(pj_optarg);
-	            break;
-	        case 'p':
-	            icedemo.opt.turn_password = pj_str(pj_optarg);
-	            break;
-	        case 'F':
-	            icedemo.opt.turn_fingerprint = PJ_TRUE;
-	            break;
 	        case 'R':
 	            icedemo.opt.regular = PJ_TRUE;
-	            break;
-	        case 'L':
-	            icedemo.opt.log_file = pj_optarg;
 	            break;
             case 'o':
                 tool_control_mode = OFFERER;
@@ -1351,10 +1305,16 @@ int main(int argc, char *argv[])
                 tool_client_port = atoi(pj_optarg);
                 break;
             case 'C':
-                tool_client_address = pj_optarg; //TODO
+                tool_client_address = pj_optarg;
                 break;
             case 'P':
                 tool_mode = TCP_MODE;
+                break;
+            case 'Z':
+                icedemo.opt.max_pkt_size = atoi(pj_optarg);
+                break;
+            case 'v':
+                verbose++;
                 break;
 	        default:
 	            printf("Argument \"%s\" is not valid. Use -h to see help\n",
@@ -1362,6 +1322,8 @@ int main(int argc, char *argv[])
 	            return 1;
         }
     }
+
+    pj_log_set_level(verbose); /* We display only the verbose level choose by user */
 
     status = icedemo_init();
     if (status != PJ_SUCCESS)
@@ -1374,9 +1336,11 @@ int main(int argc, char *argv[])
     }
     pthread_mutex_lock(&lock_on_buffer_data);
     
-    pthread_create(&sdp_tcp_server_tid, NULL, sdp_tcp_server, NULL);
+    CHECK( pj_thread_create(icedemo.pool, "sdp_tcp_server", &sdp_tcp_server,
+                NULL, 0, 0, &icedemo.sdp_thread) );
+
     iceauto_toolsrv();
     
-    err_exit("Quitting..", PJ_SUCCESS);
+    err_exit("Quitting..", PJ_SUCCESS); //TODO: catch of Ctrl+C
     return 0;
 }
