@@ -1271,7 +1271,7 @@ int main(int argc, char *argv[])
     icedemo.opt.comp_cnt = 1;
     icedemo.opt.max_host = -1;
 
-    while((c=pj_getopt_long(argc,argv, "c:n:s:t:u:p:H:L:S:O:A:C:hTFRoa", long_options, &opt_id)) != -1) {
+    while((c=pj_getopt_long(argc,argv, "c:n:s:t:u:p:H:L:S:O:A:C:PhTFRoa", long_options, &opt_id)) != -1) {
 	    switch (c) {
 	        case 'c':
 	            icedemo.opt.comp_cnt = atoi(pj_optarg);
