@@ -272,7 +272,7 @@ static void cb_on_rx_data(pj_ice_strans *ice_st,
             exit(-1);
         }
     }
-    else {
+    else { //TODO: add the connection status so we don't send messages while disconnected
         buf = (char*)pkt;
         while (nleft > 0) {
             if ( (nwritten = write(tool_sock_conn, buf, nleft)) < 0) {
@@ -1181,10 +1181,7 @@ static void iceauto_toolsrv() {
             else {
                 printf("Tool socket (TCP), invoking the connect call\n");
                 while (( n = connect(tool_sock, (struct sockaddr *)&tool_endpoint_addr, addr_len)) < 0){
-                    if (n != ECONNREFUSED) {
-                        perror("Connection error");
-                        exit(1);
-                    }
+                    perror("Connection error");
                     sleep(1);
                 }
                 tool_sock_conn = tool_sock;
