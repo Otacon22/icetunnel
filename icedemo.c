@@ -1018,6 +1018,7 @@ static int sdp_tcp_server(void *arg){
 	    exit(1);
     }
     
+    PJ_LOG(1,(THIS_FILE, "SDP TCP server waiting for connection"));
 	/* accept connection */
     if ( (sdp_conn_fd = accept(sdp_sock_fd, NULL, NULL)) < 0) {
         perror("accept error");
