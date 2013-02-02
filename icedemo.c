@@ -46,9 +46,9 @@ int tool_server_port = 7002;
 int tool_client_port = 7003;
 char *tool_client_address = "127.0.0.1";
 
-int sdp_conn_fd; /* TCP connection socket, shared for sending errors */
+int sdp_conn_fd; /* SDP TCP connection socket, shared for sending errors */
 
-int verbose = 0;
+int verbose = 0; /* Verbose level */
 
 enum connection_status {
     ESTABLISHED,
@@ -70,7 +70,8 @@ enum control_mode {
 #define THIS_FILE   "icedemo"
 
 /*
- * STUN keep-alive time, default value 15 seconds
+ * STUN keep-alive time, default value 15 seconds.
+ * It prevents the NATs from closing idle-connections.
  */
 #define KA_INTERVAL 15
 
@@ -148,8 +149,9 @@ static void icedemo_perror(const char *title, pj_status_t status)
     PJ_LOG(1,(THIS_FILE, "%s: %s", title, errmsg));
 }
 
-/* Utility: display error message and exit application (usually
- * because of fatal error.
+/*
+ * Utility: display error message and exit application (usually
+ * because of fatal error).
  */
 static void err_exit(const char *title, pj_status_t status)
 {
@@ -1166,7 +1168,7 @@ static void iceauto_toolsrv() {
             }
 
             PJ_LOG(1,(THIS_FILE, "Tool socket (TCP) connected, reading and forwarding data."));
-            while ((n = read(tool_sock_conn, tool_buffer, MAXLINE)) != 0) {
+            while ((n = socketRead(tool_sock_conn, tool_buffer, MAXLINE)) != 0) {
                 icedemo_send_data(1, tool_buffer, n);
             }
 
