@@ -3,6 +3,10 @@ ICE-experiments
 
 Some experiment did using the ICE functions of libpjproject 
 
+Requirements
+===============
+libpjproject ( http://www.pjsip.org/ )
+
 How to install
 ===============
  $ make
@@ -10,6 +14,6 @@ How to install
 How to use
 ===============
 For the offerer:
- $ ./icedemo -s stunserver.org
+ $ ./icetunnel -s stunserver.org
 For the answerer:
- $ ./icedemo -s stunserver.org -a
+ $ ./icetunnel -s stunserver.org -a

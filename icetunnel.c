@@ -67,7 +67,7 @@ enum control_mode {
 
 
 
-#define THIS_FILE   "icedemo"
+#define THIS_FILE   "icetunnel"
 
 /*
  * STUN keep-alive time, default value 15 seconds.

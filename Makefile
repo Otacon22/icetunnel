@@ -1,10 +1,7 @@
-all: icedemo ssdp-test 
+all: icetunnel ssdp-test 
 
-icedemo: icedemo.c
+icetunnel: icetunnel.c
 	$(CC) -o $@ $< `pkg-config --cflags --libs libpjproject`
 
-ssdp-test: ssdp-test.c
-	$(CC) -o $@ $< -lpthread
-
 clean:
-	rm -f icedemo.o icedemo ssdp-test.o ssdp-test
+	rm -f icetunnel.o icetunnel
