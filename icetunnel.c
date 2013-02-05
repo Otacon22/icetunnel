@@ -674,6 +674,8 @@ static int encode_session(char buffer[], unsigned maxlen)
 	    }
     }
 
+    PRINT("\n", 0, 0, 0, 0, 0, 0);
+
     if (p == buffer+maxlen)
 	    return -PJ_ETOOSMALL;
 
