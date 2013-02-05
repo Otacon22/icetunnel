@@ -1,4 +1,4 @@
-all: icetunnel ssdp-test 
+all: icetunnel 
 
 icetunnel: icetunnel.c
 	$(CC) -o $@ $< `pkg-config --cflags --libs libpjproject`
