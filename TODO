@@ -1,0 +1,3 @@
+* Add ignore interface option in commandline, for excluding interfaces from SDP
+* Restyling of commandline options, put the proxy in the form -.. --:------:--
+* Check IPv6 support!
