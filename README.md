@@ -1,7 +1,12 @@
-ICE-experiments
+ICEtunnel
 ===============
 
-Some experiment did using the ICE functions of libpjproject 
+ICEtunnel is a tool for tunneling a UDP (or TCP) connection inside a ICE UDP session, in order to get peer-to-peer connectivity
+using ICE NAT-traversal features.
+Using ICEtunnel you can get a peer-to-peer connection between two peers, even if they are both behind a NAT.
+
+ICE works in quite any case, except when one of the two networks does not permit UDP traffic, or both networks are
+symmetic-NATs (quite usual just for some enterprise-level NAT).
 
 Requirements
 ===============
