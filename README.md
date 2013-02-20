@@ -29,11 +29,11 @@ For the answerer:
 
 * On the answerer:
 
- Start a UDP server on port 7003
+ Start a UDP server on port 7003 (for example nc -u -l 7003)
 
 * On the offerer:
 
- Start a UDP client to 127.0.0.1:7002
+ Start a UDP client to 127.0.0.1:7002 (for example nc -u 127.0.0.1 7002)
 
 
  
