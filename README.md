@@ -15,5 +15,6 @@ How to use
 ===============
 For the offerer:
  $ ./icetunnel -s stunserver.org
+ 
 For the answerer:
  $ ./icetunnel -s stunserver.org -a
