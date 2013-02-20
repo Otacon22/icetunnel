@@ -1224,17 +1224,18 @@ static void icedemo_usage()
     puts(" --sdp-tcp-port, -S N  Set the TCP server port to receive SDP information (default 7001)");
     puts(" --offer-port, -O N    Set the UDP server port of the offerer (default 7002)");
     puts(" --answ-port, -A N     Set the UDP client port of the answerer (default 7003)");
-    puts(" --answ-addr, -C HOST  Set the UDP client address of the answerer (default 7004)");
+    puts(" --answ-addr, -C HOST  Set the UDP client address of the answerer (default localhost)");
     puts(" --tcp-mode, -P        Set the use of TCP instead of UDP for the tool client/server");
-    puts(" --max-pkt-size, -Z N  Set the max packet size for the STUN messages (default 2000 bytes)");
-    puts(" --verbose, -v         Verbose mode");
-    puts(" --help, -h            Display this screen.");
+    puts(" --max-pkt-size, -Z N  Set the max packet size for the UDP STUN messages (default 2000 bytes)");
     puts("");
     puts("STUN related options:");
     puts(" --stun-srv, -s HOSTDOM    Enable srflx candidate by resolving to STUN server.");
     puts("                           HOSTDOM may be a \"host_or_ip[:port]\" or a domain");
     puts("                           name if DNS SRV resolution is used.");
     puts("                           (example: stun.selbie.com or stunserver.org)");
+    puts("");
+    puts(" --verbose, -v         Verbose mode");
+    puts(" --help, -h            Display this screen.");
     puts("");
 }
 
