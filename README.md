@@ -10,7 +10,8 @@ symmetic-NATs (quite usual just for some enterprise-level NAT).
 
 Requirements
 ===============
-* Library libpjproject ( http://www.pjsip.org/ )
+* Library libpjproject ( http://www.pjsip.org/ ). I remind you to use ./configure -prefix /usr if you compile it from sources.
+* pkg-config
 
 How to install
 ===============
